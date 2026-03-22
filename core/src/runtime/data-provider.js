@@ -98,6 +98,13 @@ function createDataProvider(options) {
             const fromStore = store.getFriendBlacklist ? store.getFriendBlacklist(accountId) : [];
             return Array.isArray(fromStore) ? fromStore : [];
         },
+        getFriendCache: async (accountRef) => {
+            const accountId = resolveAccountRefId(accountRef);
+            if (!accountId) return [];
+            const fromStore = store.getFriendCache ? store.getFriendCache(accountId) : [];
+            return Array.isArray(fromStore) ? fromStore : [];
+        },
+        extractFriendsFromInteractRecords: (accountRef) => callWorkerApi(resolveAccountRefId(accountRef), 'extractFriendsFromInteractRecords'),
         getFriendLands: (accountRef, gid) => callWorkerApi(resolveAccountRefId(accountRef), 'getFriendLands', gid),
         doFriendOp: (accountRef, gid, opType) => callWorkerApi(resolveAccountRefId(accountRef), 'doFriendOp', gid, opType),
         getBag: (accountRef) => callWorkerApi(resolveAccountRefId(accountRef), 'getBag'),
@@ -117,6 +124,7 @@ function createDataProvider(options) {
         },
 
         doFarmOp: (accountRef, opType) => callWorkerApi(resolveAccountRefId(accountRef), 'doFarmOp', opType),
+        doSingleLandOp: (accountRef, payload) => callWorkerApi(resolveAccountRefId(accountRef), 'doSingleLandOp', payload),
         doAnalytics: (accountRef, sortBy) => callWorkerApi(resolveAccountRefId(accountRef), 'getAnalytics', sortBy),
         saveSettings: async (accountRef, payload) => {
             const accountId = resolveAccountRefId(accountRef);
@@ -132,6 +140,7 @@ function createDataProvider(options) {
                 preferredSeedId,
                 bagSeedPriority,
                 intervals: body.intervals,
+                friendBlockLevel: body.friendBlockLevel,
                 friendQuietHours: body.friendQuietHours,
             };
             store.applyConfigSnapshot(snapshot, { accountId });
@@ -142,6 +151,7 @@ function createDataProvider(options) {
                 preferredSeed: store.getPreferredSeed(accountId),
                 bagSeedPriority: store.getBagSeedPriority(accountId),
                 intervals: store.getIntervals(accountId),
+                friendBlockLevel: store.getFriendBlockLevel(accountId),
                 friendQuietHours: store.getFriendQuietHours(accountId),
                 configRevision: rev,
             };
@@ -150,6 +160,21 @@ function createDataProvider(options) {
         setUITheme: async (theme) => {
             const snapshot = store.setUITheme(theme);
             return { ui: snapshot.ui || store.getUI() };
+        },
+
+        getRuntimeClientConfig: () => {
+            return store.getRuntimeClientConfig ? store.getRuntimeClientConfig() : null;
+        },
+
+        setRuntimeClientConfig: async (payload) => {
+            const body = (payload && typeof payload === 'object') ? payload : {};
+            if (store.setRuntimeClientConfig) {
+                store.setRuntimeClientConfig(body);
+            }
+            const rev = nextConfigRevision();
+            // 全局配置：广播到所有 worker
+            broadcastConfigToWorkers('');
+            return { runtimeClient: store.getRuntimeClientConfig ? store.getRuntimeClientConfig() : null, configRevision: rev };
         },
 
         broadcastConfig: (accountId) => {

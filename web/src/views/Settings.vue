@@ -11,10 +11,12 @@ import BaseTextarea from '@/components/ui/BaseTextarea.vue'
 import { useAccountStore } from '@/stores/account'
 import { useFarmStore } from '@/stores/farm'
 import { useSettingStore } from '@/stores/setting'
+import { useToastStore } from '@/stores/toast'
 
 const settingStore = useSettingStore()
 const accountStore = useAccountStore()
 const farmStore = useFarmStore()
+const toast = useToastStore()
 
 const { settings, loading } = storeToRefs(settingStore)
 const { currentAccountId, accounts } = storeToRefs(accountStore)
@@ -25,6 +27,23 @@ const passwordSaving = ref(false)
 const offlineSaving = ref(false)
 const offlineTesting = ref(false)
 const qrSaving = ref(false)
+const runtimeClientSaving = ref(false)
+
+// 密码认证相关状态
+const passwordAuthDisabled = ref(false)
+const passwordAuthLoading = ref(false)
+
+const token = computed(() => {
+  return localStorage.getItem('admin_token') || '未登录'
+})
+
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text).then(() => {
+    toast.success('复制成功')
+  }).catch(() => {
+    toast.error('复制失败，请手动复制')
+  })
+}
 
 const modalVisible = ref(false)
 const modalConfig = ref({
@@ -49,6 +68,17 @@ const currentAccountName = computed(() => {
   return acc ? (acc.name || acc.nick || acc.id) : null
 })
 const allFertilizerLandTypes = ['gold', 'black', 'red', 'normal']
+
+const fertilizerBuyTypeOptions = [
+  { label: '仅有机化肥', value: 'organic' },
+  { label: '仅普通化肥', value: 'normal' },
+  { label: '两者都买', value: 'both' },
+]
+
+const fertilizerBuyModeOptions = [
+  { label: '容器不足时购买', value: 'threshold' },
+  { label: '无限购买', value: 'unlimited' },
+]
 
 const fertilizerLandTypeOptions = [
   { label: '金土地', value: 'gold' },
@@ -90,6 +120,7 @@ const localSettings = ref({
   preferredSeedId: 0,
   bagSeedPriority: [] as number[],
   intervals: { farmMin: 2, farmMax: 2, friendMin: 10, friendMax: 10 },
+  friendBlockLevel: { enabled: true, Level: 1 },
   friendQuietHours: { enabled: false, start: '23:00', end: '07:00' },
   automation: {
     farm: false,
@@ -110,6 +141,10 @@ const localSettings = ref({
     email: false,
     fertilizer_gift: false,
     fertilizer_buy: false,
+    fertilizer_buy_type: 'organic' as string,
+    fertilizer_buy_max: 10,
+    fertilizer_buy_mode: 'threshold' as string,
+    fertilizer_buy_threshold: 100,
     free_gifts: false,
     share_reward: false,
     vip_gift: false,
@@ -144,6 +179,16 @@ const analyticsCropMetas = ref<AnalyticsCropMeta[]>([])
 const stealBlacklistSearch = ref('')
 const stealBlacklistCollapsed = ref(true)
 const onlyShowUnselectedStealCrops = ref(false)
+
+watch(() => localSettings.value.automation.fertilizer_buy_mode, (mode) => {
+  if (mode === 'unlimited' && localSettings.value.automation.fertilizer_buy_type === 'both')
+    localSettings.value.automation.fertilizer_buy_type = 'organic'
+})
+
+watch(() => localSettings.value.automation.fertilizer_buy_type, (type) => {
+  if (type === 'both' && localSettings.value.automation.fertilizer_buy_mode === 'unlimited')
+    localSettings.value.automation.fertilizer_buy_mode = 'threshold'
+})
 
 function parsePositiveInt(input: unknown): number | null {
   const value = Number.parseInt(String(input ?? ''), 10)
@@ -369,6 +414,18 @@ const localQrLogin = ref({
   apiDomain: 'q.qq.com',
 })
 
+const localRuntimeClient = ref({
+  serverUrl: 'wss://gate-obt.nqf.qq.com/prod/ws',
+  clientVersion: '1.7.0.6_20260313',
+  os: 'iOS',
+  device_info: {
+    sys_software: 'iOS 26.2.1',
+    network: 'wifi',
+    memory: '7672',
+    device_id: 'iPhone X<iPhone18,3>',
+  },
+})
+
 const passwordForm = ref({
   old: '',
   new: '',
@@ -382,6 +439,7 @@ function syncLocalSettings() {
       preferredSeedId: settings.value.preferredSeedId,
       bagSeedPriority: settings.value.bagSeedPriority || [],
       intervals: settings.value.intervals,
+      friendBlockLevel: settings.value.friendBlockLevel,
       friendQuietHours: settings.value.friendQuietHours,
       automation: settings.value.automation,
     }))
@@ -407,6 +465,10 @@ function syncLocalSettings() {
         email: false,
         fertilizer_gift: false,
         fertilizer_buy: false,
+        fertilizer_buy_type: 'organic' as string,
+        fertilizer_buy_max: 10,
+        fertilizer_buy_mode: 'threshold' as string,
+        fertilizer_buy_threshold: 100,
         free_gifts: false,
         share_reward: false,
         vip_gift: false,
@@ -438,6 +500,10 @@ function syncLocalSettings() {
         email: false,
         fertilizer_gift: false,
         fertilizer_buy: false,
+        fertilizer_buy_type: 'organic' as string,
+        fertilizer_buy_max: 10,
+        fertilizer_buy_mode: 'threshold' as string,
+        fertilizer_buy_threshold: 100,
         free_gifts: false,
         share_reward: false,
         vip_gift: false,
@@ -468,6 +534,9 @@ function syncLocalSettings() {
     if (settings.value.qrLogin) {
       localQrLogin.value = JSON.parse(JSON.stringify(settings.value.qrLogin))
     }
+    if (settings.value.runtimeClient) {
+      localRuntimeClient.value = JSON.parse(JSON.stringify(settings.value.runtimeClient))
+    }
   }
 }
 
@@ -485,6 +554,7 @@ async function loadData() {
 
 onMounted(() => {
   loadData()
+  fetchPasswordAuthStatus()
 })
 
 watch(currentAccountId, () => {
@@ -561,6 +631,162 @@ const reloginUrlModeOptions = [
   { label: '二维码 + 链接', value: 'all' },
 ]
 
+const runtimeClientPresetMap = {
+  iOS: {
+    systemVersions: [
+      'iOS 15.8.4',
+      'iOS 16.6.1',
+      'iOS 16.7.10',
+      'iOS 17.5.1',
+      'iOS 17.6.1',
+      'iOS 17.7.2',
+      'iOS 18.0',
+      'iOS 18.1.1',
+      'iOS 18.2',
+      'iOS 18.3.1',
+      'iOS 18.3.2',
+      'iOS 18.4',
+      'iOS 26.2.1',
+    ],
+    networks: ['wifi', '5g', '4g'],
+    memories: ['4096', '6144', '7672', '8192'],
+    deviceIds: [
+      'iPhone X<iPhone18,3>',
+      'iPhone XR<iPhone11,8>',
+      'iPhone XS<iPhone11,2>',
+      'iPhone XS Max<iPhone11,6>',
+      'iPhone 11<iPhone12,1>',
+      'iPhone 11 Pro<iPhone12,3>',
+      'iPhone 11 Pro Max<iPhone12,5>',
+      'iPhone 12<iPhone13,2>',
+      'iPhone 12 mini<iPhone13,1>',
+      'iPhone 12 Pro<iPhone13,3>',
+      'iPhone 12 Pro Max<iPhone13,4>',
+      'iPhone 13 mini<iPhone14,4>',
+      'iPhone 13<iPhone14,5>',
+      'iPhone 13 Pro<iPhone14,2>',
+      'iPhone 13 Pro Max<iPhone14,3>',
+      'iPhone SE 3<iPhone14,6>',
+      'iPhone 14 Plus<iPhone14,8>',
+      'iPhone 14<iPhone15,4>',
+      'iPhone 14 Pro<iPhone15,2>',
+      'iPhone 14 Pro Max<iPhone15,3>',
+      'iPhone 15 Plus<iPhone15,5>',
+      'iPhone 15<iPhone16,2>',
+      'iPhone 15 Pro<iPhone16,1>',
+      'iPhone 15 Pro Max<iPhone16,2>',
+      'iPhone 16<iPhone17,3>',
+      'iPhone 16 Plus<iPhone17,4>',
+      'iPhone 16 Pro<iPhone17,1>',
+      'iPhone 16 Pro Max<iPhone17,2>',
+    ],
+    defaults: {
+      clientVersion: '1.7.0.6_20260313',
+      sys_software: 'iOS 26.2.1',
+      network: 'wifi',
+      memory: '7672',
+      device_id: 'iPhone X<iPhone18,3>',
+    },
+  },
+  Android: {
+    systemVersions: [
+      'Android 10',
+      'Android 11',
+      'Android 12',
+      'Android 12L',
+      'Android 13',
+      'Android 14',
+      'Android 15',
+      'MIUI 14 / Android 13',
+      'HyperOS 1 / Android 14',
+      'One UI 6.1 / Android 14',
+      'ColorOS 14 / Android 14',
+      'OriginOS 4 / Android 14',
+    ],
+    networks: ['wifi', '5g', '4g'],
+    memories: ['4096', '6144', '8192', '12288'],
+    deviceIds: [
+      'Samsung S23<SM-S911B>',
+      'Samsung S23 Ultra<SM-S9180>',
+      'Samsung S24<SM-S921B>',
+      'Samsung S24 Ultra<SM-S9280>',
+      'Pixel 7<GQML3>',
+      'Pixel 8<shiba>',
+      'Pixel 8 Pro<husky>',
+      'Pixel 9 Pro<caiman>',
+      'Xiaomi 13<2211133C>',
+      'Xiaomi 14<23127PN0CC>',
+      'Xiaomi 14 Pro<23116PN5BC>',
+      'Xiaomi 15<24129PN74C>',
+      'Redmi K70<2311DRK48C>',
+      'Redmi K70 Pro<23117RK66C>',
+      'OnePlus 11<PHB110>',
+      'OnePlus 12<PJD110>',
+      'OnePlus Ace 3<PGJM10>',
+      'vivo X100<V2309A>',
+      'vivo X100 Pro<V2324A>',
+      'iQOO 12<V2307A>',
+      'OPPO Find X7<PHZ110>',
+      'OPPO Find X7 Ultra<PHY110>',
+      'HUAWEI P60<ADY-AL00>',
+      'HUAWEI Mate 60<ALN-AL00>',
+      'HONOR Magic6<BDY-AN00>',
+    ],
+    defaults: {
+      clientVersion: '1.7.0.6_20260313',
+      sys_software: 'Android 14',
+      network: 'wifi',
+      memory: '8192',
+      device_id: 'Xiaomi 14<23127PN0CC>',
+    },
+  },
+} as const
+
+const runtimeOsOptions = Object.keys(runtimeClientPresetMap).map(os => ({ label: os, value: os }))
+
+function toRuntimeOptions(values: readonly string[], currentValue: string) {
+  const options = values.map(value => ({ label: value, value }))
+  const current = String(currentValue || '').trim()
+  if (!current || options.some(option => option.value === current))
+    return options
+  return [{ label: `${current} (当前值)`, value: current }, ...options]
+}
+
+const currentRuntimePreset = computed(() => {
+  const os = String(localRuntimeClient.value.os || 'iOS')
+  return runtimeClientPresetMap[os as keyof typeof runtimeClientPresetMap] || runtimeClientPresetMap.iOS
+})
+
+const runtimeSystemVersionOptions = computed(() =>
+  toRuntimeOptions(currentRuntimePreset.value.systemVersions, String(localRuntimeClient.value.device_info.sys_software || '')),
+)
+
+const runtimeNetworkOptions = computed(() =>
+  toRuntimeOptions(currentRuntimePreset.value.networks, String(localRuntimeClient.value.device_info.network || '')),
+)
+
+const runtimeMemoryOptions = computed(() =>
+  toRuntimeOptions(currentRuntimePreset.value.memories, String(localRuntimeClient.value.device_info.memory || '')),
+)
+
+const runtimeDeviceIdOptions = computed(() =>
+  toRuntimeOptions(currentRuntimePreset.value.deviceIds, String(localRuntimeClient.value.device_info.device_id || '')),
+)
+
+function handleRuntimeOsChange(value: string | number) {
+  const os = String(value || 'iOS')
+  const preset = runtimeClientPresetMap[os as keyof typeof runtimeClientPresetMap]
+  if (!preset)
+    return
+
+  localRuntimeClient.value.os = os
+  localRuntimeClient.value.clientVersion = preset.defaults.clientVersion
+  localRuntimeClient.value.device_info.sys_software = preset.defaults.sys_software
+  localRuntimeClient.value.device_info.network = preset.defaults.network
+  localRuntimeClient.value.device_info.memory = preset.defaults.memory
+  localRuntimeClient.value.device_info.device_id = preset.defaults.device_id
+}
+
 const currentChannelDocUrl = computed(() => {
   const key = String(localOffline.value.channel || '').trim().toLowerCase()
   return CHANNEL_DOCS[key] || ''
@@ -598,7 +824,8 @@ const bagSeeds = ref<BagSeedItem[]>([])
 const bagSeedsLoading = ref(false)
 
 async function fetchBagSeeds() {
-  if (!currentAccountId.value) return
+  if (!currentAccountId.value)
+    return
   bagSeedsLoading.value = true
   try {
     const { data } = await api.get('/api/bag/seeds', {
@@ -626,13 +853,15 @@ const sortedBagSeeds = computed(() => {
   return [...bagSeeds.value].sort((a, b) => {
     const pa = priorityMap.has(a.seedId) ? priorityMap.get(a.seedId)! : Number.MAX_SAFE_INTEGER
     const pb = priorityMap.has(b.seedId) ? priorityMap.get(b.seedId)! : Number.MAX_SAFE_INTEGER
-    if (pa !== pb) return pa - pb
+    if (pa !== pb)
+      return pa - pb
     return b.requiredLevel - a.requiredLevel
   })
 })
 
 function moveSeedUp(index: number) {
-  if (index <= 0) return
+  if (index <= 0)
+    return
   const seeds = sortedBagSeeds.value
   const newPriority: number[] = seeds.map(s => s.seedId)
   const a = newPriority[index]!
@@ -644,7 +873,8 @@ function moveSeedUp(index: number) {
 
 function moveSeedDown(index: number) {
   const seeds = sortedBagSeeds.value
-  if (index >= seeds.length - 1) return
+  if (index >= seeds.length - 1)
+    return
   const newPriority: number[] = seeds.map(s => s.seedId)
   const a = newPriority[index]!
   const b = newPriority[index + 1]!
@@ -753,6 +983,10 @@ async function saveAccountSettings() {
 
   localSettings.value.automation.fertilizer_land_types = normalizeFertilizerLandTypes(localSettings.value.automation.fertilizer_land_types)
   localSettings.value.automation.friend_steal_blacklist = normalizeStealPlantBlacklist(localSettings.value.automation.friend_steal_blacklist)
+  localSettings.value.automation.fertilizer_buy_max = Math.max(1, Math.min(10, Number.parseInt(String(localSettings.value.automation.fertilizer_buy_max), 10) || 10))
+  localSettings.value.automation.fertilizer_buy_threshold = Math.max(0, Number.parseInt(String(localSettings.value.automation.fertilizer_buy_threshold), 10) || 0)
+  if (localSettings.value.automation.fertilizer_buy_mode === 'unlimited' && localSettings.value.automation.fertilizer_buy_type === 'both')
+    localSettings.value.automation.fertilizer_buy_type = 'organic'
 
   saving.value = true
   try {
@@ -800,6 +1034,43 @@ async function handleChangePassword() {
   }
 }
 
+// 获取密码认证状态
+async function fetchPasswordAuthStatus() {
+  try {
+    const { data } = await api.get('/api/admin/password-auth-status')
+    if (data && data.ok) {
+      passwordAuthDisabled.value = data.data.disabled
+    }
+  }
+  catch (e) {
+    console.error('获取密码认证状态失败:', e)
+  }
+}
+
+// 切换密码认证状态
+async function handleTogglePasswordAuth() {
+  passwordAuthLoading.value = true
+  try {
+    const { data } = await api.post('/api/admin/toggle-password-auth', {
+      disabled: !passwordAuthDisabled.value,
+    })
+
+    if (data && data.ok) {
+      passwordAuthDisabled.value = data.data.disabled
+      showAlert(passwordAuthDisabled.value ? '已禁用密码认证' : '已启用密码认证')
+    }
+    else {
+      showAlert(`操作失败: ${data?.error || '未知错误'}`, 'danger')
+    }
+  }
+  catch (e: any) {
+    showAlert(`操作失败: ${e?.response?.data?.error || e?.message || '未知错误'}`, 'danger')
+  }
+  finally {
+    passwordAuthLoading.value = false
+  }
+}
+
 async function handleSaveQrLogin() {
   qrSaving.value = true
   try {
@@ -815,6 +1086,22 @@ async function handleSaveQrLogin() {
     qrSaving.value = false
   }
 }
+async function handleSaveRuntimeClient() {
+  runtimeClientSaving.value = true
+  try {
+    const res = await settingStore.saveRuntimeClientConfig(localRuntimeClient.value as any)
+    if (res.ok) {
+      showAlert('运行时连接配置已保存，运行中账号将自动重连生效')
+    }
+    else {
+      showAlert(`保存失败: ${res.error || '未知错误'}`, 'danger')
+    }
+  }
+  finally {
+    runtimeClientSaving.value = false
+  }
+}
+
 async function handleSaveOffline() {
   localOffline.value.offlineDeleteSec = Math.max(1, Number.parseInt(String(localOffline.value.offlineDeleteSec), 10) || 1)
   localOffline.value.offlineDeleteEnabled = !!localOffline.value.offlineDeleteEnabled
@@ -863,7 +1150,7 @@ async function handleTestOffline() {
       <p>加载中...</p>
     </div>
 
-    <div v-else class="grid grid-cols-1 mt-12 gap-4 text-sm lg:grid-cols-2">
+    <div v-else class="grid grid-cols-1 gap-4 text-sm lg:grid-cols-2">
       <!-- Card 1: Strategy & Automation -->
       <div v-if="currentAccountId" class="card h-full flex flex-col rounded-lg bg-white shadow dark:bg-gray-800">
         <!-- Strategy Header -->
@@ -894,9 +1181,7 @@ async function handleTestOffline() {
             <!-- 预览区域：与 BaseSelect 同结构同样式，避免切换策略时布局跳动 -->
             <div v-else-if="localSettings.plantingStrategy !== 'bag_priority'" class="flex flex-col gap-1.5">
               <label class="text-sm text-gray-700 font-medium dark:text-gray-300">策略选种预览</label>
-              <div
-                class="w-full flex items-center justify-between border border-gray-200 rounded-lg bg-gray-50 px-3 py-2 text-gray-500 dark:border-gray-600 dark:bg-gray-800/50 dark:text-gray-400"
-              >
+              <div class="w-full flex items-center justify-between border border-gray-200 rounded-lg bg-gray-50 px-3 py-2 text-gray-500 dark:border-gray-600 dark:bg-gray-800/50 dark:text-gray-400">
                 <span class="truncate">{{ strategyPreviewLabel ?? '加载中...' }}</span>
                 <div class="i-carbon-chevron-down shrink-0 text-lg text-gray-400" />
               </div>
@@ -905,17 +1190,17 @@ async function handleTestOffline() {
 
           <!-- 背包种子优先级列表 -->
           <div v-if="localSettings.plantingStrategy === 'bag_priority'" class="mt-3">
-            <div class="flex items-center justify-between mb-2">
+            <div class="mb-2 flex items-center justify-between">
               <label class="text-sm text-gray-700 font-medium dark:text-gray-300">背包种子优先级</label>
               <div class="flex items-center gap-2">
                 <button
-                  class="text-xs text-blue-500 hover:text-blue-600 dark:text-blue-400"
+                  class="text-xs text-blue-500 dark:text-blue-400 hover:text-blue-600"
                   @click="fetchBagSeeds"
                 >
                   刷新
                 </button>
                 <button
-                  class="text-xs text-gray-500 hover:text-gray-600 dark:text-gray-400"
+                  class="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-600"
                   @click="resetBagSeedPriority"
                 >
                   重置排序
@@ -923,18 +1208,18 @@ async function handleTestOffline() {
               </div>
             </div>
 
-            <div v-if="bagSeedsLoading" class="text-center py-4 text-gray-500">
+            <div v-if="bagSeedsLoading" class="py-4 text-center text-gray-500">
               加载中...
             </div>
-            <div v-else-if="sortedBagSeeds.length === 0" class="text-center py-4 text-gray-500 dark:text-gray-400">
+            <div v-else-if="sortedBagSeeds.length === 0" class="py-4 text-center text-gray-500 dark:text-gray-400">
               背包中暂无种子
             </div>
-            <div v-else class="space-y-1 max-h-64 overflow-y-auto">
+            <div v-else class="max-h-64 overflow-y-auto space-y-1">
               <div
                 v-for="(seed, index) in sortedBagSeeds"
                 :key="seed.seedId"
                 draggable="true"
-                class="flex items-center gap-3 p-2 border rounded-lg cursor-grab select-none border-gray-200 bg-gray-50 dark:border-gray-600 dark:bg-gray-800/50"
+                class="flex cursor-grab select-none items-center gap-3 border border-gray-200 rounded-lg bg-gray-50 p-2 dark:border-gray-600 dark:bg-gray-800/50"
                 @dragstart="onDragStart($event, index)"
                 @dragover="onDragOver"
                 @drop="onDrop(index)"
@@ -948,16 +1233,16 @@ async function handleTestOffline() {
                   v-if="seed.image"
                   :src="seed.image"
                   :alt="seed.name"
-                  class="w-8 h-8 object-contain pointer-events-none"
+                  class="pointer-events-none h-8 w-8 object-contain"
                 >
-                <div v-else class="w-8 h-8 bg-gray-200 rounded dark:bg-gray-700 pointer-events-none" />
-                <div class="flex-1 min-w-0 pointer-events-none">
+                <div v-else class="pointer-events-none h-8 w-8 rounded bg-gray-200 dark:bg-gray-700" />
+                <div class="pointer-events-none min-w-0 flex-1">
                   <div class="flex items-center gap-2">
                     <span
                       v-if="seed.requiredLevel >= 200"
-                      class="px-1.5 py-0.5 text-xs bg-yellow-100 text-yellow-700 rounded dark:bg-yellow-900/50 dark:text-yellow-400"
+                      class="rounded bg-yellow-100 px-1.5 py-0.5 text-xs text-yellow-700 dark:bg-yellow-900/50 dark:text-yellow-400"
                     >活动</span>
-                    <span class="text-sm font-medium text-gray-800 dark:text-gray-200 truncate">{{ seed.name }}</span>
+                    <span class="truncate text-sm text-gray-800 font-medium dark:text-gray-200">{{ seed.name }}</span>
                   </div>
                   <div class="text-xs text-gray-500 dark:text-gray-400">
                     数量: {{ seed.count }} | {{ seed.requiredLevel >= 200 ? '活动种子' : `${seed.requiredLevel}级` }}
@@ -966,14 +1251,14 @@ async function handleTestOffline() {
                 </div>
                 <div class="flex flex-col gap-1">
                   <button
-                    class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-30"
+                    class="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 dark:hover:text-gray-300"
                     :disabled="index === 0"
                     @click.stop="moveSeedUp(index)"
                   >
                     <div class="i-carbon-chevron-up" />
                   </button>
                   <button
-                    class="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-30"
+                    class="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30 dark:hover:text-gray-300"
                     :disabled="index === sortedBagSeeds.length - 1"
                     @click.stop="moveSeedDown(index)"
                   >
@@ -982,7 +1267,7 @@ async function handleTestOffline() {
                 </div>
               </div>
             </div>
-            <div class="mt-2 text-xs text-gray-500 dark:text-gray-400 space-y-1">
+            <div class="mt-2 text-xs text-gray-500 space-y-1 dark:text-gray-400">
               <p>* 拖拽或点击箭头调整种植优先级</p>
               <p>* 仅支持 1x1 种子，2x2 及以上种子会被跳过</p>
               <p>* 1x1 种子用完后将自动切换为"最高等级"策略</p>
@@ -1021,6 +1306,25 @@ async function handleTestOffline() {
           </div>
 
           <div class="mt-4 flex flex-wrap items-center gap-4 border-t pt-3 dark:border-gray-700">
+            <div class="flex items-center gap-2">
+              <BaseSwitch
+                v-model="localSettings.friendBlockLevel.enabled"
+                label="启用屏蔽好友等级"
+              />
+              <BaseInput
+                v-model="localSettings.friendBlockLevel.Level"
+                type="number"
+                min="1"
+                max="999"
+                step="1"
+                required
+                class="w-24"
+                :disabled="!localSettings.friendBlockLevel.enabled"
+              />
+            </div>
+          </div>
+
+          <div class="mt-4 flex flex-wrap items-center gap-4 border-t pt-3 dark:border-gray-700">
             <BaseSwitch
               v-model="localSettings.friendQuietHours.enabled"
               label="启用静默时段"
@@ -1052,7 +1356,7 @@ async function handleTestOffline() {
         </div>
 
         <!-- Auto Control Content -->
-        <div class="flex-1 p-4 space-y-4">
+        <div class="p-4 space-y-4">
           <!-- Switches Grid -->
           <div class="grid grid-cols-2 gap-3 md:grid-cols-3">
             <BaseSwitch v-model="localSettings.automation.farm" label="自动种植收获" />
@@ -1070,6 +1374,46 @@ async function handleTestOffline() {
             <BaseSwitch v-model="localSettings.automation.open_server_gift" label="自动开服红包" />
             <BaseSwitch v-model="localSettings.automation.fertilizer_gift" label="自动填充化肥" />
             <BaseSwitch v-model="localSettings.automation.fertilizer_buy" label="自动购买化肥" />
+          </div>
+
+          <div v-if="localSettings.automation.fertilizer_buy" class="border border-cyan-200 rounded bg-cyan-50/60 p-3 dark:border-cyan-800/60 dark:bg-cyan-900/10">
+            <div class="mb-2 text-sm text-cyan-800 font-medium dark:text-cyan-300">
+              购买化肥配置
+            </div>
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <BaseSelect
+                v-model="localSettings.automation.fertilizer_buy_type"
+                label="购买种类"
+                :options="fertilizerBuyTypeOptions"
+              />
+              <BaseSelect
+                v-model="localSettings.automation.fertilizer_buy_mode"
+                label="购买条件"
+                :options="fertilizerBuyModeOptions"
+              />
+            </div>
+            <div class="grid grid-cols-1 mt-3 gap-3 md:grid-cols-2">
+              <BaseInput
+                v-model.number="localSettings.automation.fertilizer_buy_max"
+                label="本轮最多购买总数（个）"
+                type="number"
+                min="1"
+                max="10"
+              />
+              <BaseInput
+                v-if="localSettings.automation.fertilizer_buy_mode === 'threshold'"
+                v-model.number="localSettings.automation.fertilizer_buy_threshold"
+                label="容器低于此小时数时购买"
+                type="number"
+                min="0"
+              />
+            </div>
+            <p v-if="localSettings.automation.fertilizer_buy_mode === 'threshold'" class="mt-2 text-xs text-cyan-700 dark:text-cyan-300">
+              阈值为 0 表示容器空了再买。
+            </p>
+            <p v-if="localSettings.automation.fertilizer_buy_mode === 'unlimited'" class="mt-2 text-xs text-amber-600 dark:text-amber-400">
+              无限购买模式下不能同时选择两种化肥
+            </p>
           </div>
 
           <!-- Sub-controls -->
@@ -1090,7 +1434,7 @@ async function handleTestOffline() {
             <div class="border border-blue-200 rounded-lg bg-blue-50/70 p-3 text-gray-800 shadow-sm dark:border-blue-500/50 dark:bg-[#17243a] dark:text-white">
               <div class="mb-1 flex items-center justify-between gap-3">
                 <div class="min-w-0 flex items-center gap-2">
-                  <div class="h-9 w-9 flex items-center justify-center rounded-lg border border-blue-300/70 bg-white/90 dark:border-blue-500/40 dark:bg-blue-500/20">
+                  <div class="h-9 w-9 flex items-center justify-center border border-blue-300/70 rounded-lg bg-white/90 dark:border-blue-500/40 dark:bg-blue-500/20">
                     <div class="i-carbon-filter text-xl text-blue-700 dark:text-blue-200" />
                   </div>
                   <div class="min-w-0">
@@ -1098,7 +1442,7 @@ async function handleTestOffline() {
                       <div class="truncate text-base font-semibold">
                         排除作物
                       </div>
-                      <div class="rounded-full border border-blue-300 bg-white/95 px-2 py-0.5 text-xs text-blue-700 shadow-sm dark:border-blue-300/60 dark:bg-blue-500/15 dark:text-blue-100">
+                      <div class="border border-blue-300 rounded-full bg-white/95 px-2 py-0.5 text-xs text-blue-700 shadow-sm dark:border-blue-300/60 dark:bg-blue-500/15 dark:text-blue-100">
                         <span class="font-semibold">{{ stealBlacklistCount }} / {{ stealCropOptions.length }}</span>
                       </div>
                     </div>
@@ -1109,7 +1453,7 @@ async function handleTestOffline() {
                 </div>
                 <button
                   type="button"
-                  class="h-9 w-9 flex items-center justify-center rounded-lg border border-blue-300/70 bg-white/90 text-blue-700 transition hover:bg-blue-100 dark:border-blue-500/40 dark:bg-blue-500/20 dark:text-blue-100 dark:hover:bg-blue-500/30"
+                  class="h-9 w-9 flex items-center justify-center border border-blue-300/70 rounded-lg bg-white/90 text-blue-700 transition dark:border-blue-500/40 dark:bg-blue-500/20 hover:bg-blue-100 dark:text-blue-100 dark:hover:bg-blue-500/30"
                   :aria-expanded="!stealBlacklistCollapsed"
                   @click="stealBlacklistCollapsed = !stealBlacklistCollapsed"
                 >
@@ -1131,7 +1475,7 @@ async function handleTestOffline() {
                     <BaseButton
                       variant="outline"
                       size="sm"
-                      class="!border-blue-300 !text-blue-700 hover:!bg-blue-100 dark:!border-blue-400/70 dark:!text-blue-100 dark:hover:!bg-blue-500/20"
+                      class="!border-blue-300 !text-blue-700 dark:!border-blue-400/70 hover:!bg-blue-100 dark:!text-blue-100 dark:hover:!bg-blue-500/20"
                       :disabled="stealBlacklistCount >= stealCropOptions.length"
                       @click="filterUnselectedStealCrops"
                     >
@@ -1150,58 +1494,60 @@ async function handleTestOffline() {
                 </div>
 
                 <div class="relative mb-2">
-                  <div class="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-base text-blue-500/70 dark:text-blue-200/70">
+                  <div class="pointer-events-none absolute left-3 top-1/2 text-base text-blue-500/70 -translate-y-1/2 dark:text-blue-200/70">
                     <div class="i-carbon-search" />
                   </div>
                   <input
                     v-model="stealBlacklistSearch"
                     type="text"
                     placeholder="搜索作物名或 Seed ID"
-                    class="w-full border border-blue-200 rounded-lg bg-white py-2 pl-9 pr-3 text-sm text-gray-700 outline-none placeholder:text-gray-400 focus:border-blue-400 focus:ring-2 focus:ring-blue-300/20 dark:border-blue-400/40 dark:bg-[#1c2b45] dark:text-blue-50 dark:placeholder:text-blue-200/50 dark:focus:border-blue-300/70"
+                    class="w-full border border-blue-200 rounded-lg bg-white py-2 pl-9 pr-3 text-sm text-gray-700 outline-none dark:border-blue-400/40 focus:border-blue-400 dark:bg-[#1c2b45] dark:text-blue-50 placeholder:text-gray-400 focus:ring-2 focus:ring-blue-300/20 dark:focus:border-blue-300/70 dark:placeholder:text-blue-200/50"
                   >
                 </div>
 
-              <div v-if="stealCropOptions.length > 0">
-                <div
-                  v-if="filteredStealCropOptions.length > 0"
-                  class="max-h-56 grid grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3"
-                >
-                  <button
-                    v-for="crop in filteredStealCropOptions"
-                    :key="crop.plantId"
-                    type="button"
-                    class="flex w-full cursor-pointer items-center gap-2 rounded border bg-white px-2 py-1.5 text-left text-xs text-gray-700 transition dark:bg-gray-800 dark:text-gray-300"
-                    :class="isCropBlacklisted(crop.plantId)
-                      ? 'border-blue-500 ring-1 ring-blue-300/70 dark:border-blue-400 dark:ring-blue-700/50'
-                      : 'border-gray-200 hover:border-blue-300 dark:border-gray-700 dark:hover:border-blue-700'"
-                    :aria-pressed="isCropBlacklisted(crop.plantId)"
-                    @click="toggleStealBlacklistCrop(crop.plantId)"
+                <div v-if="stealCropOptions.length > 0">
+                  <div
+                    v-if="filteredStealCropOptions.length > 0"
+                    class="grid grid-cols-1 max-h-56 gap-2 overflow-y-auto pr-1 lg:grid-cols-3 sm:grid-cols-2"
                   >
-                    <img
-                      v-if="crop.image"
-                      :src="crop.image"
-                      :alt="crop.name"
-                      class="h-[1.8rem] w-[1.8rem] rounded object-cover"
+                    <button
+                      v-for="crop in filteredStealCropOptions"
+                      :key="crop.plantId"
+                      type="button"
+                      class="w-full flex cursor-pointer items-center gap-2 border rounded bg-white px-2 py-1.5 text-left text-xs text-gray-700 transition dark:bg-gray-800 dark:text-gray-300"
+                      :class="isCropBlacklisted(crop.plantId)
+                        ? 'border-blue-500 ring-1 ring-blue-300/70 dark:border-blue-400 dark:ring-blue-700/50'
+                        : 'border-gray-200 hover:border-blue-300 dark:border-gray-700 dark:hover:border-blue-700'"
+                      :aria-pressed="isCropBlacklisted(crop.plantId)"
+                      @click="toggleStealBlacklistCrop(crop.plantId)"
                     >
-                    <div v-else class="h-[1.8rem] w-[1.8rem] flex items-center justify-center rounded bg-gray-100 text-[10px] text-gray-500 dark:bg-gray-700 dark:text-gray-400">
-                      <div class="i-carbon-image" />
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <div class="truncate text-xs font-medium">{{ crop.name }}</div>
-                      <div class="text-[11px] text-gray-500 dark:text-gray-400">
-                        Seed ID: {{ crop.seedId === null ? '?' : crop.seedId }}   Lv.{{ crop.level === null ? '?' : crop.level }}
+                      <img
+                        v-if="crop.image"
+                        :src="crop.image"
+                        :alt="crop.name"
+                        class="h-[1.8rem] w-[1.8rem] rounded object-cover"
+                      >
+                      <div v-else class="h-[1.8rem] w-[1.8rem] flex items-center justify-center rounded bg-gray-100 text-[10px] text-gray-500 dark:bg-gray-700 dark:text-gray-400">
+                        <div class="i-carbon-image" />
                       </div>
-                    </div>
-                  </button>
+                      <div class="min-w-0 flex-1">
+                        <div class="truncate text-xs font-medium">
+                          {{ crop.name }}
+                        </div>
+                        <div class="text-[11px] text-gray-500 dark:text-gray-400">
+                          Seed ID: {{ crop.seedId === null ? '?' : crop.seedId }}   Lv.{{ crop.level === null ? '?' : crop.level }}
+                        </div>
+                      </div>
+                    </button>
+                  </div>
+                  <div v-else class="rounded bg-white px-2 py-2 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                    未找到匹配作物，请调整关键词后重试。
+                  </div>
                 </div>
                 <div v-else class="rounded bg-white px-2 py-2 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-                  未找到匹配作物，请调整关键词后重试。
+                  暂无可选作物，请先等待种子列表加载完成。
                 </div>
               </div>
-              <div v-else class="rounded bg-white px-2 py-2 text-xs text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-                暂无可选作物，请先等待种子列表加载完成。
-              </div>
-            </div>
             </div>
             <div class="border border-amber-200 rounded bg-amber-50/60 p-3 dark:border-amber-800/60 dark:bg-amber-900/10">
               <div class="mb-2 text-sm text-amber-800 font-medium dark:text-amber-300">
@@ -1243,7 +1589,7 @@ async function handleTestOffline() {
         </div>
 
         <!-- Save Button -->
-        <div class="mt-auto flex justify-end border-t bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/50">
+        <div class="flex justify-end border-t bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/50">
           <BaseButton
             variant="primary"
             size="sm"
@@ -1315,6 +1661,110 @@ async function handleTestOffline() {
               修改管理密码
             </BaseButton>
           </div>
+
+          <!-- 取消密码访问功能 -->
+          <div class="mt-4 border-t pt-4 dark:border-gray-700">
+            <div class="mb-3 flex items-center justify-between">
+              <div>
+                <h4 class="text-sm text-gray-900 font-medium dark:text-gray-100">
+                  取消密码访问
+                </h4>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  开启后无需输入管理员密码即可直接进入界面
+                </p>
+              </div>
+              <BaseSwitch
+                :model-value="passwordAuthDisabled"
+                :disabled="passwordAuthLoading"
+                @update:model-value="handleTogglePasswordAuth"
+              />
+            </div>
+
+            <div v-if="passwordAuthDisabled" class="mt-2 rounded bg-orange-50 p-2 text-xs text-orange-700 dark:bg-orange-900/20 dark:text-orange-300">
+              <div class="flex items-center gap-1">
+                <div class="i-carbon-warning-alt" />
+                <span>安全提醒：已禁用密码认证，任何人都可以访问管理面板</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- QR Login Header -->
+        <div class="border-b border-t bg-gray-50/50 px-4 py-3 dark:border-gray-700 dark:bg-gray-800/50">
+          <h3 class="flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
+            <div class="i-carbon-connection-signal" />
+            运行时连接配置
+          </h3>
+        </div>
+
+        <!-- Runtime Client Content -->
+        <div class="p-4 space-y-3">
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <BaseInput
+              v-model="localRuntimeClient.serverUrl"
+              label="服务器 WS 地址"
+              type="text"
+              placeholder="wss://.../ws"
+            />
+            <BaseInput
+              v-model="localRuntimeClient.clientVersion"
+              label="游戏版本号"
+              type="text"
+              placeholder="例如: 1.7.0.6_20260313"
+            />
+          </div>
+
+          <BaseSelect
+            v-model="localRuntimeClient.os"
+            label="系统 (os)"
+            :options="runtimeOsOptions"
+            @change="handleRuntimeOsChange"
+          />
+
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <BaseSelect
+              v-model="localRuntimeClient.device_info.sys_software"
+              label="系统版本号"
+              :options="runtimeSystemVersionOptions"
+            />
+            <BaseSelect
+              v-model="localRuntimeClient.device_info.network"
+              label="网络类型"
+              :options="runtimeNetworkOptions"
+            />
+          </div>
+
+          <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <BaseSelect
+              v-model="localRuntimeClient.device_info.memory"
+              label="内存大小（单位MB）"
+              :options="runtimeMemoryOptions"
+            />
+            <BaseSelect
+              v-model="localRuntimeClient.device_info.device_id"
+              label="设备ID"
+              :options="runtimeDeviceIdOptions"
+            />
+          </div>
+
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            切换系统后会自动带入一组对应预设参数，其他项目可以从下拉列表中直接选择。
+          </p>
+
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            保存后，运行中的账号会自动重连以生效。
+          </p>
+
+          <div class="flex justify-end">
+            <BaseButton
+              variant="primary"
+              size="sm"
+              :loading="runtimeClientSaving"
+              @click="handleSaveRuntimeClient"
+            >
+              保存运行时连接配置
+            </BaseButton>
+          </div>
         </div>
 
         <!-- QR Login Header -->
@@ -1348,7 +1798,7 @@ async function handleTestOffline() {
           </div>
         </div>
         <!-- Offline Header -->
-        <div class="border-b border-t bg-gray-50/50 px-4 py-3 dark:border-gray-700 dark:bg-gray-800/50">
+        <div class="border-b bg-gray-50/50 px-4 py-3 dark:border-gray-700 dark:bg-gray-800/50">
           <h3 class="flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
             <div class="i-carbon-notification" />
             下线提醒
@@ -1438,28 +1888,60 @@ async function handleTestOffline() {
               placeholder="例如: { &quot;title&quot;: &quot;{{title}}&quot;, &quot;message&quot;: &quot;{{content}}&quot; }"
             />
           </template>
+
+          <!-- Save Offline Button -->
+          <div class="flex justify-end gap-2 pt-3">
+            <BaseButton
+              variant="secondary"
+              size="sm"
+              :loading="offlineTesting"
+              :disabled="offlineSaving"
+              @click="handleTestOffline"
+            >
+              测试通知
+            </BaseButton>
+            <BaseButton
+              variant="primary"
+              size="sm"
+              :loading="offlineSaving"
+              :disabled="offlineTesting"
+              @click="handleSaveOffline"
+            >
+              保存下线提醒设置
+            </BaseButton>
+          </div>
         </div>
 
-        <!-- Save Offline Button -->
-        <div class="mt-auto flex justify-end gap-2 border-t bg-gray-50 px-4 py-3 dark:border-gray-700 dark:bg-gray-900/50">
-          <BaseButton
-            variant="secondary"
-            size="sm"
-            :loading="offlineTesting"
-            :disabled="offlineSaving"
-            @click="handleTestOffline"
-          >
-            测试通知
-          </BaseButton>
-          <BaseButton
-            variant="primary"
-            size="sm"
-            :loading="offlineSaving"
-            :disabled="offlineTesting"
-            @click="handleSaveOffline"
-          >
-            保存下线提醒设置
-          </BaseButton>
+        <!-- Token Info Header -->
+        <div class="border-t bg-gray-50/50 px-4 py-3 dark:border-gray-700 dark:bg-gray-800/50">
+          <h3 class="flex items-center gap-2 text-base text-gray-900 font-bold dark:text-gray-100">
+            <div class="i-carbon-code" />
+            请求参数信息
+          </h3>
+        </div>
+
+        <!-- Token Info Content -->
+        <div class="p-4 space-y-3">
+          <div class="flex items-center gap-2">
+            <input
+              type="text"
+              :value="token"
+              readonly
+              class="flex-1 border border-gray-200 rounded-lg bg-white px-3 py-2 text-sm text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
+            >
+            <BaseButton
+              v-if="token !== '未登录'"
+              variant="secondary"
+              size="sm"
+              @click="copyToClipboard(token)"
+            >
+              <div class="i-carbon-copy mr-1" />
+              复制
+            </BaseButton>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            x-admin-token 用于API请求认证，复制后可用于第三方工具调用接口。
+          </p>
         </div>
       </div>
     </div>

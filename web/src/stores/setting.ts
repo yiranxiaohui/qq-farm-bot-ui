@@ -2,6 +2,10 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '@/api'
 
+type FertilizerMode = 'none' | 'normal' | 'organic' | 'both'
+type FertilizerBuyType = 'organic' | 'normal' | 'both'
+type FertilizerBuyMode = 'threshold' | 'unlimited'
+
 export interface AutomationConfig {
   farm?: boolean
   farm_manage?: boolean
@@ -11,15 +15,27 @@ export interface AutomationConfig {
   farm_push?: boolean
   land_upgrade?: boolean
   friend?: boolean
+  friend_help_exp_limit?: boolean
   task?: boolean
+  email?: boolean
+  fertilizer_gift?: boolean
+  fertilizer_buy?: boolean
+  fertilizer_buy_type?: FertilizerBuyType
+  fertilizer_buy_max?: number
+  fertilizer_buy_mode?: FertilizerBuyMode
+  fertilizer_buy_threshold?: number
   sell?: boolean
-  fertilizer?: string
+  fertilizer?: FertilizerMode
   fertilizer_multi_season?: boolean
   fertilizer_land_types?: string[]
   friend_steal?: boolean
   friend_steal_blacklist?: number[]
   friend_help?: boolean
   friend_bad?: boolean
+  free_gifts?: boolean
+  share_reward?: boolean
+  vip_gift?: boolean
+  month_card?: boolean
   open_server_gift?: boolean
 }
 
@@ -30,6 +46,11 @@ export interface IntervalsConfig {
   farmMax?: number
   friendMin?: number
   friendMax?: number
+}
+
+export interface FriendBlockLevelConfig {
+  enabled?: boolean
+  Level?: number
 }
 
 export interface FriendQuietHoursConfig {
@@ -59,6 +80,20 @@ export interface QrLoginConfig {
   apiDomain: string
 }
 
+export interface RuntimeClientDeviceInfo {
+  sys_software: string
+  network: string
+  memory: string
+  device_id: string
+}
+
+export interface RuntimeClientConfig {
+  serverUrl: string
+  clientVersion: string
+  os: string
+  device_info: RuntimeClientDeviceInfo
+}
+
 export interface BagSeed {
   seedId: number
   name: string
@@ -67,17 +102,18 @@ export interface BagSeed {
   image: string
   plantSize: number
 }
-
 export interface SettingsState {
   plantingStrategy: string
   preferredSeedId: number
   bagSeedPriority: number[]
   intervals: IntervalsConfig
+  friendBlockLevel: FriendBlockLevelConfig
   friendQuietHours: FriendQuietHoursConfig
   automation: AutomationConfig
   ui: UIConfig
   offlineReminder: OfflineConfig
   qrLogin: QrLoginConfig
+  runtimeClient: RuntimeClientConfig
 }
 
 export const useSettingStore = defineStore('setting', () => {
@@ -86,6 +122,7 @@ export const useSettingStore = defineStore('setting', () => {
     preferredSeedId: 0,
     bagSeedPriority: [],
     intervals: {},
+    friendBlockLevel: { enabled: true, Level: 1 },
     friendQuietHours: { enabled: false, start: '23:00', end: '07:00' },
     automation: {},
     ui: {},
@@ -104,6 +141,17 @@ export const useSettingStore = defineStore('setting', () => {
     qrLogin: {
       apiDomain: 'q.qq.com',
     },
+    runtimeClient: {
+      serverUrl: 'wss://gate-obt.nqf.qq.com/prod/ws',
+      clientVersion: '1.7.0.6_20260313',
+      os: 'iOS',
+      device_info: {
+        sys_software: 'iOS 26.2.1',
+        network: 'wifi',
+        memory: '7672',
+        device_id: 'iPhone X<iPhone18,3>',
+      },
+    },
   })
   const loading = ref(false)
 
@@ -121,6 +169,7 @@ export const useSettingStore = defineStore('setting', () => {
         settings.value.preferredSeedId = d.preferredSeed || 0
         settings.value.bagSeedPriority = Array.isArray(d.bagSeedPriority) ? d.bagSeedPriority : []
         settings.value.intervals = d.intervals || {}
+        settings.value.friendBlockLevel = { enabled: true, Level: 1, ...(d.friendBlockLevel || {}) }
         settings.value.friendQuietHours = d.friendQuietHours || { enabled: false, start: '23:00', end: '07:00' }
         settings.value.automation = d.automation || {}
         settings.value.ui = d.ui || {}
@@ -140,6 +189,17 @@ export const useSettingStore = defineStore('setting', () => {
         settings.value.qrLogin = d.qrLogin || {
           apiDomain: 'q.qq.com',
         }
+        settings.value.runtimeClient = d.runtimeClient || {
+          serverUrl: 'wss://gate-obt.nqf.qq.com/prod/ws',
+          clientVersion: '1.7.0.6_20260313',
+          os: 'iOS',
+          device_info: {
+            sys_software: 'iOS 26.2.1',
+            network: 'wifi',
+            memory: '7672',
+            device_id: 'iPhone X<iPhone18,3>',
+          },
+        }
       }
     }
     finally {
@@ -158,6 +218,7 @@ export const useSettingStore = defineStore('setting', () => {
         preferredSeedId: newSettings.preferredSeedId,
         bagSeedPriority: newSettings.bagSeedPriority,
         intervals: newSettings.intervals,
+        friendBlockLevel: newSettings.friendBlockLevel,
         friendQuietHours: newSettings.friendQuietHours,
       }
 
@@ -210,6 +271,22 @@ export const useSettingStore = defineStore('setting', () => {
       loading.value = false
     }
   }
+  async function saveRuntimeClientConfig(config: RuntimeClientConfig) {
+    loading.value = true
+    try {
+      const { data } = await api.post('/api/settings/runtime-client', config)
+      if (data && data.ok) {
+        const saved = (data.data && data.data.runtimeClient) ? data.data.runtimeClient : config
+        settings.value.runtimeClient = saved
+        return { ok: true }
+      }
+      return { ok: false, error: '保存失败' }
+    }
+    finally {
+      loading.value = false
+    }
+  }
+
   async function changeAdminPassword(oldPassword: string, newPassword: string) {
     loading.value = true
     try {
@@ -221,5 +298,5 @@ export const useSettingStore = defineStore('setting', () => {
     }
   }
 
-  return { settings, loading, fetchSettings, saveSettings, saveOfflineConfig, saveQrLoginConfig, changeAdminPassword }
+  return { settings, loading, fetchSettings, saveSettings, saveOfflineConfig, saveQrLoginConfig, saveRuntimeClientConfig, changeAdminPassword }
 })
